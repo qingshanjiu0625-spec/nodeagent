@@ -30,7 +30,7 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 # 2) 基础变量（可通过环境变量覆盖）
 ############################################
 CONTAINER_NAME="${CONTAINER_NAME:-nodeagent}"
-IMAGE_DEFAULT="${IMAGE_DEFAULT:-qingshanjiu/nodeagent:latest}"
+IMAGE_DEFAULT="${IMAGE_DEFAULT:-docker.io/qingshanjiu/nodeagent:latest}"
 
 DATA_ROOT="${DATA_ROOT:-${HOME}/.nodeagent}"     # 宿主机持久化根目录
 APP_DIR="${APP_DIR:-${DATA_ROOT}/compose}"       # 保留给你放配置（不依赖 compose）
