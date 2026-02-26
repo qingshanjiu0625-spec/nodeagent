@@ -204,7 +204,6 @@ cat <<'TXT'
   2) Anthropic (Claude)
   3) OpenAI
   4) Gemini
-  5) XAI
 TXT
 
 echo "请选择模型:"
@@ -212,7 +211,6 @@ echo "1) NEXOS"
 echo "2) Anthropic"
 echo "3) OpenAI"
 echo "4) Gemini"
-#echo "5) XAI"
 
 read -r -p "输入对应数字: " choice
 
