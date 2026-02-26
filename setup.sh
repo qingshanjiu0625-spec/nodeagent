@@ -277,7 +277,7 @@ docker run -d --name "${CONTAINER_NAME}" --restart=always \
   -e "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" \
   -e "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}" \
   -e "${API_KEY_KEY}=${API_KEY_VAL}" \
-  -v ${DATA_ROOT}:/data \
+  -v ${DATA_ROOT}:/data:Z \
   -p "${host_port}:${host_port}" \
   "${OPENCLAW_IMAGE}"
 
