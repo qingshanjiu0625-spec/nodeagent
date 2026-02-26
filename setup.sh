@@ -2,47 +2,139 @@
 set -euo pipefail
 
 ############################################
-# 0) 你指定必须包含的命令（保留原样）
-# docker pull qingshanjiu/nodeagent:latest
+# NodeAgent/OpenClaw 一键部署脚本（Docker run 版）
+# - 检查/安装 Docker（Linux）
+# - 按架构拉取镜像
+# - 生成 gateway token
+# - 提示/写入 AI Key、Telegram Bot Token
+# - 映射 /data（持久化到 ~/.nodeagent）
+# - 启动容器
+# - 循环 5 次检查服务就绪（每次 3s），就绪后自动打开浏览器并提示用 token 登录
+# - 生成快捷命令：nodeagent {start|stop|restart|enter|logs|uninstall}
 ############################################
-# 注意：这条通常用于安装 Homebrew 相关的 openclaw 脚本；Docker 部署不一定需要它。
-#/bin/bash -c "$(curl -fsSL https://raw.xxxx.com/Homebrew/install/HEAD/openclaw.sh)" || true
+
+############################################
+# 0) 你指定必须包含的命令（保留原样）
+############################################
+# /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/qingshanjiu0625-spec/nodeagent/refs/heads/main/setup.sh)" || true
 
 ############################################
 # 1) 工具函数
 ############################################
-log()  { printf "\033[1;32m[openclaw]\033[0m %s\n" "$*"; }
+log()  { printf "\033[1;32m[nodeagent]\033[0m %s\n" "$*"; }
 warn() { printf "\033[1;33m[warn]\033[0m %s\n" "$*"; }
 die()  { printf "\033[1;31m[error]\033[0m %s\n" "$*"; exit 1; }
+need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1
+############################################
+# 2) 基础变量（可通过环境变量覆盖）
+############################################
+CONTAINER_NAME="${CONTAINER_NAME:-nodeagent}"
+IMAGE_DEFAULT="${IMAGE_DEFAULT:-qingshanjiu/nodeagent:latest}"
+
+DATA_ROOT="${DATA_ROOT:-${HOME}/.nodeagent}"     # 宿主机持久化根目录
+APP_DIR="${APP_DIR:-${DATA_ROOT}/compose}"       # 保留给你放配置（不依赖 compose）
+CONFIG_DIR="${CONFIG_DIR:-${DATA_ROOT}/config}"
+WORKSPACE_DIR="${WORKSPACE_DIR:-${DATA_ROOT}/workspace}"
+
+DEFAULT_PORT="${DEFAULT_PORT:-62430}"
+
+MAX_RETRY="${MAX_RETRY:-10}"
+SLEEP_SEC="${SLEEP_SEC:-5}"
+
+############################################
+# 3) 安装/卸载辅助
+############################################
+container_exists() {
+  docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER_NAME"
 }
 
+uninstall_container() {
+  local remove_data="${1:-0}"   # 1=删除 DATA_ROOT
+  local remove_image="${2:-0}"  # 1=删除镜像
+
+  if ! need_cmd docker; then
+    die "未检测到 docker，无法卸载。"
+  fi
+
+  if container_exists; then
+    warn "正在卸载容器：$CONTAINER_NAME"
+    docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    log "容器已删除：$CONTAINER_NAME"
+  else
+    warn "容器不存在：$CONTAINER_NAME（无需卸载）"
+  fi
+
+  if [ "$remove_image" = "1" ]; then
+    warn "正在删除镜像：$OPENCLAW_IMAGE"
+    docker rmi -f "$OPENCLAW_IMAGE" >/dev/null 2>&1 || true
+  fi
+
+  if [ "$remove_data" = "1" ]; then
+    warn "正在删除数据目录（危险操作）：$DATA_ROOT"
+    rm -rf "$DATA_ROOT" || true
+  fi
+
+  log "卸载完成 ✅"
+}
+
+usage() {
+  cat <<'TXT'
+用法：
+  ./setup.sh                # 安装/启动
+  ./setup.sh uninstall       # 卸载容器
+  ./setup.sh uninstall --data   # 卸载容器 + 删除数据目录（危险）
+  ./setup.sh uninstall --image  # 卸载容器 + 删除镜像
+TXT
+}
+
+############################################
+# 4) 处理命令参数：uninstall
+############################################
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+# 默认镜像名（uninstall 用得上）
+OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-$IMAGE_DEFAULT}"
+
+if [ "${1:-}" = "uninstall" ]; then
+  remove_data=0
+  remove_image=0
+  shift || true
+  for arg in "$@"; do
+    case "$arg" in
+      --data)  remove_data=1 ;;
+      --image) remove_image=1 ;;
+      *) ;;
+    esac
+  done
+  uninstall_container "$remove_data" "$remove_image"
+  exit 0
+fi
+
+############################################
+# 5) OS / 架构 -> Docker platform
+############################################
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m | tr '[:upper:]' '[:lower:]')"
 
-############################################
-# 2) 选择 Docker 平台（满足 3：x86/amd64/arm/armv8）
-############################################
-# 映射规则（常见）：
-# - x86_64/amd64 -> linux/amd64
-# - i386/i686/x86 -> linux/386
-# - armv7l/arm -> linux/arm/v7
-# - aarch64/arm64/armv8 -> linux/arm64
 platform="linux/amd64"
 case "$arch" in
   x86_64|amd64) platform="linux/amd64" ;;
   aarch64|arm64|armv8*) platform="linux/arm64" ;;
+  armv7l|armv7|armhf|arm) platform="linux/arm/v7" ;;
   *)
-    warn "未识别架构：$arch，默认使用 linux/amd64（如拉取失败请手动改 platform）"
+    warn "未识别架构：$arch，默认使用 linux/amd64"
     platform="linux/amd64"
     ;;
 esac
-log "OS=$os  ARCH=$arch  ->  DOCKER_PLATFORM=$platform"
+log "OS=$os ARCH=$arch -> DOCKER_PLATFORM=$platform"
 
 ############################################
-# 3) 检查 Docker 环境（满足 1）
+# 6) 检查 Docker 环境（Linux 自动安装）
 ############################################
 install_docker_linux() {
   log "检测到 Linux：将尝试安装 Docker（需要 sudo 权限）"
@@ -50,152 +142,113 @@ install_docker_linux() {
     sudo apt-get update -y || true
     sudo apt-get install -y curl || true
   fi
-  # 官方便捷安装脚本（Docker Engine）
   curl -fsSL https://get.docker.com | sudo sh
-
-  # 启动服务
   sudo systemctl enable docker >/dev/null 2>&1 || true
   sudo systemctl restart docker >/dev/null 2>&1 || true
 
-  # 免 sudo（可选）
-  if need_cmd id && need_cmd getent; then
-    if ! groups "$USER" | grep -q '\bdocker\b'; then
+  if need_cmd id; then
+    if ! groups "$USER" 2>/dev/null | grep -q '\bdocker\b'; then
       sudo usermod -aG docker "$USER" || true
-      warn "已把 $USER 加入 docker 组；你可能需要重新登录一次终端让权限生效。"
+      warn "已把 $USER 加入 docker 组；可能需要重新登录终端让权限生效。"
     fi
   fi
 }
 
 if ! need_cmd docker; then
-  # 2) 没有 docker 给安装上（满足 2）
   case "$os" in
-    linux)
-      install_docker_linux
-      ;;
-    darwin)
-      die "macOS 未检测到 docker。请先安装 Docker Desktop，然后重新运行本脚本。"
-      ;;
-    *)
-      die "未检测到 docker，且当前 OS=$os 不在自动安装范围。请先安装 Docker + Compose v2。"
-      ;;
+    linux) install_docker_linux ;;
+    darwin) die "macOS 未检测到 docker。请先安装 Docker Desktop 后重试。" ;;
+    *) die "未检测到 docker，请先手动安装 Docker 后重试。" ;;
   esac
 fi
 
-# Compose v2 检测：docker compose ...
-if ! docker compose version >/dev/null 2>&1; then
-  die "检测不到 Docker Compose v2（docker compose）。请升级 Docker/Compose 后再运行。"
+log "Docker: $(docker --version)"
+
+############################################
+# 7) 重复安装判断：容器已存在则不安装
+############################################
+if container_exists; then
+  warn "检测到容器已存在：${CONTAINER_NAME}（视为已安装），将不会重复安装。"
+  echo "你可以使用快捷命令："
+  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} enter"
+  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} restart"
+  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} logs"
+  echo "如需卸载："
+  echo "  ./setup.sh uninstall"
+  exit 0
 fi
 
-log "Docker OK: $(docker --version)"
-log "Compose OK: $(docker compose version | head -n1)"
-
 ############################################
-# 4) 端口选择（满足 6：默认 62430）
+# 8) 端口选择（默认 62430）
 ############################################
-default_port="62430"
-read -r -p "请选择宿主机端口（直接回车默认 ${default_port}）： " host_port
-host_port="${host_port:-$default_port}"
+read -r -p "请选择宿主机端口（直接回车默认 ${DEFAULT_PORT}）： " host_port
+host_port="${host_port:-$DEFAULT_PORT}"
 if ! [[ "$host_port" =~ ^[0-9]+$ ]] || [ "$host_port" -lt 1 ] || [ "$host_port" -gt 65535 ]; then
   die "端口不合法：$host_port"
 fi
 
 ############################################
-# 4.1) OPENCLAW_GATEWAY_TOKEN（满足 65位）
+# 9) 生成 gateway token（65位）
 ############################################
-OPENCLAW_GATEWAY_TOKEN="$(python3 - <<'PY'
-import secrets, string
-alphabet = string.ascii_lowercase + string.digits
-print(''.join(secrets.choice(alphabet) for _ in range(65)))
-PY
-)"
-echo "网关token：${OPENCLAW_GATEWAY_TOKEN}，登录时用到"
+OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-$(python3 -c "import secrets,string;alphabet=string.ascii_lowercase+string.digits;print(''.join(secrets.choice(alphabet) for _ in range(65)))")}"
+log "Gateway token（登录用）：$OPENCLAW_GATEWAY_TOKEN"
 
 ############################################
-# 4.2) 模型选择（支持：NEXOS, Anthropic，OpenAI，Gemini，AI）
-# ANTHROPIC_API_KEY：您的 Anthropic API 密钥，用于 Claude 集成（可选）
-# OPENAI_API_KEY：您的 OpenAI API 密钥，用于 AI 集成（可选）
-# GEMINI_API_KEY： 您的 Gemini API 密钥，用于 AI 集成（可选）
-# XAI_API_KEY：用于 AI 集成的 XAI API 密钥（可选
+# 10) 模型/AI Key 选择与输入
 ############################################
 cat <<'TXT'
 
 ================= AI Key 提示 =================
-接下来你需要准备你的 AI Provider Key（例如 OpenAI API Key）。
-- 建议：先去对应平台创建/复制 Key，再回来粘贴。
-- 你也可以先跳过，之后再写入 /data/openclaw/compose/.env 或 OpenClaw 配置中。
-- 模型选择（可选：NEXOS, Anthropic，OpenAI，Gemini，AI）
-
+请选择模型并输入对应的 API KEY：
+  1) NEXOS
+  2) Anthropic (Claude)
+  3) OpenAI
+  4) Gemini
+  5) XAI
 TXT
 
-echo "请选择模型："
+echo "请选择模型:"
 echo "1) NEXOS"
 echo "2) Anthropic"
 echo "3) OpenAI"
 echo "4) Gemini"
-echo "5) AI (XAI)"
+echo "5) XAI"
 
-read -p "输入对应数字: " choice
+read -r -p "输入对应数字: " choice
 
-case $choice in
-    1)
-        read -p "请输入 NEXOS_API_KEY: " key
-        API_KEY_KEY="NEXOS_API_KEY"
-        API_KEY_VAL="$key"
-        ;;
-    2)
-        read -p "请输入 ANTHROPIC_API_KEY: " key
-        API_KEY_KEY="ANTHROPIC_API_KEY"
-        API_KEY_VAL="$key"
-        ;;
-    3)
-        read -p "请输入 OPENAI_API_KEY: " key
-        API_KEY_KEY="OPENAI_API_KEY"
-        API_KEY_VAL="$key"
-        ;;
-    4)
-        read -p "请输入 GEMINI_API_KEY: " key
-        API_KEY_KEY="GEMINI_API_KEY"
-        API_KEY_VAL="$key"
-        ;;
-    5)
-        read -p "请输入 XAI_API_KEY: " key
-        API_KEY_KEY="XAI_API_KEY"
-        API_KEY_VAL="$key"
-        ;;
-    *)
-        echo "无效选择"
-        exit 1
-        ;;
+API_KEY_KEY=""
+API_KEY_VAL=""
+
+case "${choice:-}" in
+  1) read -r -p "请输入 NEXOS_API_KEY: " key; API_KEY_KEY="NEXOS_API_KEY"; API_KEY_VAL="$key" ;;
+  2) read -r -p "请输入 ANTHROPIC_API_KEY: " key; API_KEY_KEY="ANTHROPIC_API_KEY"; API_KEY_VAL="$key" ;;
+  3) read -r -p "请输入 OPENAI_API_KEY: " key; API_KEY_KEY="OPENAI_API_KEY"; API_KEY_VAL="$key" ;;
+  4) read -r -p "请输入 GEMINI_API_KEY: " key; API_KEY_KEY="GEMINI_API_KEY"; API_KEY_VAL="$key" ;;
+  5) read -r -p "请输入 XAI_API_KEY: " key; API_KEY_KEY="XAI_API_KEY"; API_KEY_VAL="$key" ;;
+  *) die "无效选择" ;;
 esac
 
+if [ -z "${API_KEY_VAL:-}" ]; then
+  die "${API_KEY_KEY} 不能为空"
+fi
+
 ############################################
-# 10) 提示用户生成 bot token（满足 4.0）并可选写入渠道（满足 4）
+# 11) Bot Token（Telegram）
 ############################################
 cat <<'TXT'
 
 ================= Bot Token 提示 =================
-如果你要接入 Telegram  等，需要先去平台创建 Bot 并拿到 token。
-- Telegram：找 @BotFather 创建 bot，拿到 token
-- Discord：Developer Portal 创建应用 -> Bot -> Token
-
-脚本可选帮你执行 channels add（会把 token 写进持久化配置里）
+请输入 Telegram Bot Token（找 @BotFather 创建 bot 获取）。
 TXT
 
-read -r -p "配置一个渠道机器人（telegram）: " TELEGRAM_BOT_TOKEN
-TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-N}"
-if [ ! -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-  die "Telegram Token不合法"
+read -r -p "请输入 TELEGRAM_BOT_TOKEN: " TELEGRAM_BOT_TOKEN
+if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+  die "Telegram Token 不能为空"
 fi
 
 ############################################
-# 5) /data 持久化映射（满足 6.1）
+# 12) 持久化目录（映射到容器 /data）
 ############################################
-# 你要求“将 /data 目录给用户映射好”，这里直接用宿主机 /data/openclaw 持久化：
-DATA_ROOT="./openclaw"
-CONFIG_DIR="${DATA_ROOT}/config"       # -> /home/node/.openclaw
-WORKSPACE_DIR="${DATA_ROOT}/workspace" # -> /home/node/.openclaw/workspace
-APP_DIR="${DATA_ROOT}/compose"         # docker-compose.yml/.env 放这里
-
 ensure_dir() {
   local d="$1"
   if [ -d "$d" ]; then return 0; fi
@@ -204,187 +257,169 @@ ensure_dir() {
   sudo mkdir -p "$d"
   sudo chown -R "$(id -u)":"$(id -g)" "$DATA_ROOT" || true
 }
+ensure_dir "$DATA_ROOT"
+ensure_dir "$APP_DIR"
 ensure_dir "$CONFIG_DIR"
 ensure_dir "$WORKSPACE_DIR"
-ensure_dir "$APP_DIR"
 
-log "数据将持久化到："
-log "  CONFIG    : $CONFIG_DIR"
-log "  WORKSPACE : $WORKSPACE_DIR"
-log "  COMPOSE   : $APP_DIR"
+log "数据持久化目录：${DATA_ROOT}（已映射到容器 /data，防止配置丢失）"
 
 ############################################
-# 6) 选择镜像并按平台拉取（满足 3）
+# 13) 拉取镜像
 ############################################
-# 官方 compose 默认用 OPENCLAW_IMAGE（默认 openclaw:local），这里用社区预构建镜像更省事
-# 你也可以改成自己 build 的 openclaw:local。
-IMAGE_DEFAULT="qingshanjiu/nodeagent:latest"
-CONTAINER_NAME="nodeagent"
-#read -r -p "请输入要使用的 OpenClaw 镜像（回车默认 ${IMAGE_DEFAULT}）： " OPENCLAW_IMAGE
-#OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-$IMAGE_DEFAULT}"
-OPENCLAW_IMAGE="$IMAGE_DEFAULT"
-
 log "拉取镜像：${OPENCLAW_IMAGE}（platform=${platform}）"
 docker pull --platform "$platform" "$OPENCLAW_IMAGE"
 
 ############################################
-# 7) 拉取官方 docker-compose.yml（并写入 .env）
+# 14) 启动容器（docker run）
 ############################################
-COMPOSE_YML="${APP_DIR}/docker-compose.yml"
-ENV_FILE="${APP_DIR}/.env"
-
-log "下载官方 docker-compose.yml 到：$COMPOSE_YML"
-curl -fsSL \
-  https://raw.githubusercontent.com/openclaw/openclaw/main/docker-compose.yml \
-  -o "$COMPOSE_YML"
-
-log "写入 .env 到：$ENV_FILE"
-cat >"$ENV_FILE" <<EOF
-# OpenClaw Docker env
-OPENCLAW_IMAGE=${OPENCLAW_IMAGE}
-
-# 持久化目录（宿主机）
-OPENCLAW_CONFIG_DIR=${CONFIG_DIR}
-OPENCLAW_WORKSPACE_DIR=${WORKSPACE_DIR}
-
-# 端口：宿主机端口 -> 容器内 18789
-OPENCLAW_GATEWAY_PORT=${host_port}
-
-# 可选：绑定方式（lan/loopback），默认 lan
-OPENCLAW_GATEWAY_BIND=lan
-EOF
-
-############################################
-# 8) 生成 gateway token（满足 4.1）
-############################################
-# 官方 doctor 支持 --generate-gateway-token（可用于自动化）:contentReference[oaicite:1]{index=1}
-log "生成/确保 gateway token 存在（写入配置目录内 openclaw.json）"
-docker run -d --platform "$platform" --name "$CONTAINER_NAME" --restart=always \
-  -e "TZ=Asia/Kuala_Lumpur" \
-  -e PORT="${host_port}" \
-  -e HOME=/home/node \
-  -e TERM=xterm-256color \
-  -e OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN}" \
+log "启动容器：${CONTAINER_NAME}"
+docker run -d --name "${CONTAINER_NAME}" --restart=always \
+  -e "PORT=${host_port}" \
+  -e "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" \
   -e "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}" \
   -e "${API_KEY_KEY}=${API_KEY_VAL}" \
-  -v "${CONFIG_DIR}:/home/node/.openclaw" \
-  -v "${WORKSPACE_DIR}:/home/node/.openclaw/workspace" \
-  -p "${host_port}":"${host_port}" \
-  "$OPENCLAW_IMAGE" >/dev/null
+  -v ${DATA_ROOT}:/data \
+  -p "${host_port}:${host_port}" \
+  "${OPENCLAW_IMAGE}"
 
-# 从配置里读出 token（尽量不依赖 jq）
-OPENCLAW_JSON="${CONFIG_DIR}/openclaw.json"
-if [ ! -f "$OPENCLAW_JSON" ]; then
-  warn "未找到 ${OPENCLAW_JSON}，将继续启动，但你可能需要手动在 UI 里设置 token。"
-  OPENCLAW_GATEWAY_TOKEN=""
-else
-  OPENCLAW_GATEWAY_TOKEN="$(python3 - <<'PY'
-import json,sys,os
-p=os.environ.get("P","")
-try:
-  d=json.load(open(p,"r",encoding="utf-8"))
-  print(((d.get("gateway") or {}).get("auth") or {}).get("token") or "")
-except Exception:
-  print("")
-PY
-  P="$OPENCLAW_JSON")"
+############################################
+# 15) 循环检查服务是否就绪（5次，每次 3 秒）
+############################################
+http_ready() {
+  if need_cmd curl; then
+    curl -fsS --max-time 2 "http://127.0.0.1:${host_port}/" >/dev/null 2>&1
+    return $?
+  fi
+  if need_cmd nc; then
+    nc -z 127.0.0.1 "$host_port" >/dev/null 2>&1
+    return $?
+  fi
+  (echo >/dev/tcp/127.0.0.1/"$host_port") >/dev/null 2>&1
+}
+
+is_ready() {
+  local status
+  status="$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  [ "$status" = "running" ] || return 1
+  http_ready
+}
+
+log "等待服务就绪（最多 ${MAX_RETRY} 次，每次间隔 ${SLEEP_SEC}s）..."
+ready=0
+for ((i=1; i<=MAX_RETRY; i++)); do
+  if is_ready; then
+    ready=1
+    log "服务已就绪 ✅（第 ${i} 次检测成功）"
+    break
+  fi
+  if [ "$i" -lt "$MAX_RETRY" ]; then
+    warn "第 ${i} 次检测失败，${SLEEP_SEC}s 后重试..."
+    sleep "$SLEEP_SEC"
+  fi
+done
+
+if [ "$ready" -ne 1 ]; then
+  warn "服务未在规定次数内就绪，请查看日志："
+  echo "  docker logs -f --tail=200 ${CONTAINER_NAME}"
+  exit 1
 fi
 
-if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-  # 让 compose 环境变量拿到 token（compose 文件会注入 OPENCLAW_GATEWAY_TOKEN）:contentReference[oaicite:2]{index=2}
-  # 追加到 .env（覆盖写法：先过滤旧行再追加）
-  tmp_env="$(mktemp)"
-  grep -v '^OPENCLAW_GATEWAY_TOKEN=' "$ENV_FILE" >"$tmp_env" || true
-  printf "OPENCLAW_GATEWAY_TOKEN=%s\n" "$OPENCLAW_GATEWAY_TOKEN" >>"$tmp_env"
-  mv "$tmp_env" "$ENV_FILE"
-  log "Gateway token 已生成并写入 .env"
-else
-  warn "未能自动读出 gateway token。后续你可用命令输出带 token 的 dashboard 链接：docker compose run --rm openclaw-cli dashboard --no-open"
-fi
-
 ############################################
-# 11) 启动 openclaw（满足 7）
+# 16) 自动打开浏览器 + 提示使用 gateway token 登录
 ############################################
-#log "启动 OpenClaw Gateway（docker compose up -d openclaw-gateway）"
-#(cd "$APP_DIR" && docker compose up -d openclaw-gateway)
+DASH_URL="http://127.0.0.1:${host_port}/?token=${OPENCLAW_GATEWAY_TOKEN}"
 
-############################################
-# 12) 自动打开浏览器 + 提示 gateway token 登录（满足 8）
-############################################
-# 官方推荐：dashboard --no-open 重新生成带 token 的仪表板链接:contentReference[oaicite:3]{index=3}
-log "获取 dashboard 链接（带 token），并尝试自动打开浏览器"
-#dash_url="$(
-#  cd "$APP_DIR" && docker compose run --rm openclaw-cli dashboard --no-open 2>/dev/null \
-#    | awk 'match($0, /https?:\/\/[^ ]+/, a){print a[0]; exit} match($0, /http:\/\/[^ ]+/, a){print a[0]; exit} { }'
-#)"
+open_browser() {
+  case "$(uname -s)" in
+    Darwin)
+      open "$DASH_URL" >/dev/null 2>&1 || true
+      ;;
+    Linux)
+      if need_cmd xdg-open; then
+        xdg-open "$DASH_URL" >/dev/null 2>&1 || true
+      else
+        warn "找不到 xdg-open，无法自动打开浏览器，请手动打开：$DASH_URL"
+      fi
+      ;;
+    *)
+      warn "未知系统，无法自动打开浏览器，请手动打开：$DASH_URL"
+      ;;
+  esac
+}
 
-# 如果没抓到链接，就用本地端口兜底
-if [ -z "${dash_url:-}" ]; then
-  dash_url="http://127.0.0.1:${host_port}/"
-fi
-
-log "Dashboard: $dash_url"
-case "$os" in
-  darwin)  open "$dash_url" >/dev/null 2>&1 || true ;;
-  linux)   xdg-open "$dash_url" >/dev/null 2>&1 || true ;;
-  *)       true ;;
-esac
+log "正在打开浏览器：$DASH_URL"
+open_browser
 
 cat <<TXT
 
 ================= 登录提示 =================
 浏览器已打开（或请手动打开）：
-  $dash_url
+  $DASH_URL
 
-如果页面提示 unauthorized / pairing required：
-- 你可以再次运行：
-  cd "$APP_DIR"
-然后用页面设置里粘贴 gateway token（或直接用带 token 的 URL 打开）。
+请使用 gateway token 登录/配对：
+  $OPENCLAW_GATEWAY_TOKEN
+
+查看日志：
+  docker logs -f --tail=200 $CONTAINER_NAME
+
+卸载：
+  ./setup.sh uninstall
 TXT
 
 ############################################
-# 13) 生成快捷方式（满足 9）
+# 17) 生成快捷方式：~/.local/bin/nodeagent
 ############################################
 BIN_DIR="${HOME}/.local/bin"
 mkdir -p "$BIN_DIR"
 
-cat >"${BIN_DIR}/openclaw" <<EOF
+cat >"${BIN_DIR}/nodeagent" <<EOF
 #!/usr/bin/env bash
+set -euo pipefail
 
 CONTAINER_NAME="${CONTAINER_NAME}"
 
-if ! docker ps -a --format '{{.Names}}' | grep -q "^\$CONTAINER_NAME\$"; then
-  echo "容器不存在: \$CONTAINER_NAME"
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker 未安装"
   exit 1
 fi
 
-case "\$1" in
-  start) docker start "\$CONTAINER_NAME" ;;
-  stop) docker stop "\$CONTAINER_NAME" ;;
+case "\${1:-}" in
+  start)   docker start "\$CONTAINER_NAME" ;;
+  stop)    docker stop "\$CONTAINER_NAME" ;;
   restart) docker restart "\$CONTAINER_NAME" ;;
-  enter) docker exec -it "\$CONTAINER_NAME" bash ;;
-  logs) docker logs -f --tail=200 "\$CONTAINER_NAME" ;;
-  *) echo "Usage: openclaw {start|stop|restart|enter|logs}" ;;
+  enter)   docker exec -it "\$CONTAINER_NAME" bash ;;
+  logs)    docker logs -f --tail=200 "\$CONTAINER_NAME" ;;
+  uninstall)
+    docker stop "\$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rm -f "\$CONTAINER_NAME" >/dev/null 2>&1 || true
+    echo "已卸载容器：\$CONTAINER_NAME"
+    echo "如需删除数据目录（危险）：rm -rf \"${DATA_ROOT}\""
+    ;;
+  *)
+    echo "Usage: nodeagent {start|stop|restart|enter|logs|uninstall}"
+    ;;
 esac
 EOF
 
-chmod +x "${BIN_DIR}/openclaw"
+chmod +x "${BIN_DIR}/nodeagent"
 
 cat <<TXT
 
 ================= 快捷方式已生成 =================
 已创建：
-  ${BIN_DIR}/openclaw enter     # 进入容器
-  ${BIN_DIR}/openclaw restart   # 重启 gateway
-  ${BIN_DIR}/openclaw start     # 启动 gateway
-  ${BIN_DIR}/openclaw stop      # 停止 gateway
-  ${BIN_DIR}/openclaw logs      # 看日志
+  ${BIN_DIR}/nodeagent enter       # 进入容器
+  ${BIN_DIR}/nodeagent restart     # 重启容器
+  ${BIN_DIR}/nodeagent start       # 启动容器
+  ${BIN_DIR}/nodeagent stop        # 停止容器
+  ${BIN_DIR}/nodeagent logs        # 查看日志
+  ${BIN_DIR}/nodeagent uninstall   # 卸载容器（不删数据）
 
 如果你的 PATH 里没有 ~/.local/bin，请追加：
   echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.bashrc
   source ~/.bashrc
 
-安装/数据持久化目录：
+数据持久化目录：
   ${DATA_ROOT}
 
 完成 ✅
