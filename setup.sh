@@ -170,9 +170,9 @@ log "Docker: $(docker --version)"
 if container_exists; then
   warn "检测到容器已存在：${CONTAINER_NAME}（视为已安装），将不会重复安装。"
   echo "你可以使用快捷命令："
-  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} enter"
-  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} restart"
-  echo "  ${HOME}/.local/bin/${CONTAINER_NAME} logs"
+  echo "  ${CONTAINER_NAME} enter"
+  echo "  ${CONTAINER_NAME} restart"
+  echo "  ${CONTAINER_NAME} logs"
   echo "如需卸载："
   echo "  ./setup.sh uninstall"
   exit 0
@@ -212,7 +212,7 @@ echo "1) NEXOS"
 echo "2) Anthropic"
 echo "3) OpenAI"
 echo "4) Gemini"
-echo "5) XAI"
+#echo "5) XAI"
 
 read -r -p "输入对应数字: " choice
 
@@ -404,18 +404,57 @@ EOF
 
 chmod +x "${BIN_DIR}/nodeagent"
 
+############################################
+# 生成 openclaw 别名命令
+############################################
+
+cat > "${BIN_DIR}/openclaw" <<EOF
+#!/usr/bin/env bash
+
+CONTAINER_NAME="${CONTAINER_NAME}"
+
+if ! docker ps --format '{{.Names}}' | grep -qx "\$CONTAINER_NAME"; then
+  echo "容器未运行：\$CONTAINER_NAME"
+  echo "请先执行：nodeagent start"
+  exit 1
+fi
+
+if [ "\$1" = "gateway" ]; then
+  shift
+  case "\$1" in
+    start|stop|restart|status)
+      docker exec "\$CONTAINER_NAME" openclaw gateway "\$1"
+      ;;
+    *)
+      echo "Usage: openclaw gateway {start|stop|restart|status}"
+      ;;
+  esac
+else
+  echo "Usage:"
+  echo "  openclaw gateway {start|stop|restart|status}"
+fi
+EOF
+
+chmod +x "${BIN_DIR}/openclaw"
+
 cat <<TXT
 
 ================= 快捷方式已生成 =================
 已创建：
-  ${BIN_DIR}/nodeagent enter       # 进入容器
-  ${BIN_DIR}/nodeagent restart     # 重启容器
-  ${BIN_DIR}/nodeagent start       # 启动容器
-  ${BIN_DIR}/nodeagent stop        # 停止容器
-  ${BIN_DIR}/nodeagent logs        # 查看日志
-  ${BIN_DIR}/nodeagent uninstall   # 卸载容器（不删数据）
+  nodeagent enter       # 进入容器
+  nodeagent restart     # 重启容器
+  nodeagent start       # 启动容器
+  nodeagent stop        # 停止容器
+  nodeagent logs        # 查看日志
+  nodeagent uninstall   # 卸载容器（不删数据）
 
-如果你的 PATH 里没有 ~/.local/bin，请追加：
+openclaw 相关快捷方式：
+  openclaw gateway start
+  openclaw gateway stop
+  openclaw gateway restart
+  openclaw gateway status
+
+如果你的 PATH 里没有 ~/.local/bin，使用 快捷方式 请追加：
   echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.bashrc
   source ~/.bashrc
 
