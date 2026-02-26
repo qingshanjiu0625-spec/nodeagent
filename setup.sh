@@ -108,7 +108,7 @@ alphabet = string.ascii_lowercase + string.digits
 print(''.join(secrets.choice(alphabet) for _ in range(65)))
 PY
 )"
-echo $OPENCLAW_GATEWAY_TOKEN
+echo "网关token：${OPENCLAW_GATEWAY_TOKEN}，登录时用到"
 
 ############################################
 # 4.2) 模型选择（支持：NEXOS, Anthropic，OpenAI，Gemini，AI）
@@ -117,6 +117,16 @@ echo $OPENCLAW_GATEWAY_TOKEN
 # GEMINI_API_KEY： 您的 Gemini API 密钥，用于 AI 集成（可选）
 # XAI_API_KEY：用于 AI 集成的 XAI API 密钥（可选
 ############################################
+cat <<'TXT'
+
+================= AI Key 提示 =================
+接下来你需要准备你的 AI Provider Key（例如 OpenAI API Key）。
+- 建议：先去对应平台创建/复制 Key，再回来粘贴。
+- 你也可以先跳过，之后再写入 /data/openclaw/compose/.env 或 OpenClaw 配置中。
+- 模型选择（可选：NEXOS, Anthropic，OpenAI，Gemini，AI）
+
+TXT
+
 echo "请选择模型："
 echo "1) NEXOS"
 echo "2) Anthropic"
@@ -159,6 +169,25 @@ case $choice in
 esac
 
 ############################################
+# 10) 提示用户生成 bot token（满足 4.0）并可选写入渠道（满足 4）
+############################################
+cat <<'TXT'
+
+================= Bot Token 提示 =================
+如果你要接入 Telegram  等，需要先去平台创建 Bot 并拿到 token。
+- Telegram：找 @BotFather 创建 bot，拿到 token
+- Discord：Developer Portal 创建应用 -> Bot -> Token
+
+脚本可选帮你执行 channels add（会把 token 写进持久化配置里）
+TXT
+
+read -r -p "配置一个渠道机器人（telegram）: " TELEGRAM_BOT_TOKEN
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-N}"
+if [ ! -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
+  die "Telegram Token不合法"
+fi
+
+############################################
 # 5) /data 持久化映射（满足 6.1）
 ############################################
 # 你要求“将 /data 目录给用户映射好”，这里直接用宿主机 /data/openclaw 持久化：
@@ -190,6 +219,7 @@ log "  COMPOSE   : $APP_DIR"
 # 官方 compose 默认用 OPENCLAW_IMAGE（默认 openclaw:local），这里用社区预构建镜像更省事
 # 你也可以改成自己 build 的 openclaw:local。
 IMAGE_DEFAULT="qingshanjiu/nodeagent:latest"
+CONTAINER_NAME="nodeagent"
 #read -r -p "请输入要使用的 OpenClaw 镜像（回车默认 ${IMAGE_DEFAULT}）： " OPENCLAW_IMAGE
 #OPENCLAW_IMAGE="${OPENCLAW_IMAGE:-$IMAGE_DEFAULT}"
 OPENCLAW_IMAGE="$IMAGE_DEFAULT"
@@ -229,12 +259,13 @@ EOF
 ############################################
 # 官方 doctor 支持 --generate-gateway-token（可用于自动化）:contentReference[oaicite:1]{index=1}
 log "生成/确保 gateway token 存在（写入配置目录内 openclaw.json）"
-docker run --rm --platform "$platform" \
+docker run -d --platform "$platform" --name "$CONTAINER_NAME" --restart=always \
   -e "TZ=Asia/Kuala_Lumpur" \
   -e PORT="${host_port}" \
   -e HOME=/home/node \
   -e TERM=xterm-256color \
   -e OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN}" \
+  -e "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}" \
   -e "${API_KEY_KEY}=${API_KEY_VAL}" \
   -v "${CONFIG_DIR}:/home/node/.openclaw" \
   -v "${WORKSPACE_DIR}:/home/node/.openclaw/workspace" \
@@ -272,76 +303,20 @@ else
 fi
 
 ############################################
-# 9) 提示用户获取 AI Key（满足 5）
-############################################
-cat <<'TXT'
-
-================= AI Key 提示 =================
-接下来你需要准备你的 AI Provider Key（例如 OpenAI API Key）。
-- 建议：先去对应平台创建/复制 Key，再回来粘贴。
-- 你也可以先跳过，之后再写入 /data/openclaw/compose/.env 或 OpenClaw 配置中。
-
-TXT
-
-read -r -p "是否现在写入 OPENAI_API_KEY 到 .env？(y/N): " set_key
-set_key="${set_key:-N}"
-if [[ "$set_key" =~ ^[Yy]$ ]]; then
-  read -r -s -p "请输入 OPENAI_API_KEY（输入时不回显）： " OPENAI_API_KEY
-  echo
-  tmp_env="$(mktemp)"
-  grep -v '^OPENAI_API_KEY=' "$ENV_FILE" >"$tmp_env" || true
-  printf "OPENAI_API_KEY=%s\n" "$OPENAI_API_KEY" >>"$tmp_env"
-  mv "$tmp_env" "$ENV_FILE"
-  log "已写入 OPENAI_API_KEY 到 .env"
-else
-  warn "已跳过写入 AI Key。"
-fi
-
-############################################
-# 10) 提示用户生成 bot token（满足 4.0）并可选写入渠道（满足 4）
-############################################
-cat <<'TXT'
-
-================= Bot Token 提示 =================
-如果你要接入 Telegram / Discord 等，需要先去平台创建 Bot 并拿到 token。
-- Telegram：找 @BotFather 创建 bot，拿到 token
-- Discord：Developer Portal 创建应用 -> Bot -> Token
-
-脚本可选帮你执行 channels add（会把 token 写进持久化配置里）
-TXT
-
-read -r -p "是否现在配置一个渠道（telegram/discord）？(y/N): " add_channel
-add_channel="${add_channel:-N}"
-if [[ "$add_channel" =~ ^[Yy]$ ]]; then
-  read -r -p "选择渠道类型（telegram/discord）： " channel_type
-  channel_type="$(echo "$channel_type" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$channel_type" != "telegram" && "$channel_type" != "discord" ]]; then
-    warn "未知渠道：$channel_type，跳过配置。"
-  else
-    read -r -s -p "请输入 ${channel_type} bot token（不回显）： " BOT_TOKEN
-    echo
-    log "写入渠道配置（docker compose run --rm openclaw-cli channels add ...）"
-    (cd "$APP_DIR" && docker compose run --rm openclaw-cli \
-      channels add --channel "$channel_type" --token "$BOT_TOKEN")
-    log "渠道已配置完成"
-  fi
-fi
-
-############################################
 # 11) 启动 openclaw（满足 7）
 ############################################
-log "启动 OpenClaw Gateway（docker compose up -d openclaw-gateway）"
-(cd "$APP_DIR" && docker compose up -d openclaw-gateway)
+#log "启动 OpenClaw Gateway（docker compose up -d openclaw-gateway）"
+#(cd "$APP_DIR" && docker compose up -d openclaw-gateway)
 
 ############################################
 # 12) 自动打开浏览器 + 提示 gateway token 登录（满足 8）
 ############################################
 # 官方推荐：dashboard --no-open 重新生成带 token 的仪表板链接:contentReference[oaicite:3]{index=3}
 log "获取 dashboard 链接（带 token），并尝试自动打开浏览器"
-dash_url="$(
-  cd "$APP_DIR" && docker compose run --rm openclaw-cli dashboard --no-open 2>/dev/null \
-    | awk 'match($0, /https?:\/\/[^ ]+/, a){print a[0]; exit} match($0, /http:\/\/[^ ]+/, a){print a[0]; exit} { }'
-)"
+#dash_url="$(
+#  cd "$APP_DIR" && docker compose run --rm openclaw-cli dashboard --no-open 2>/dev/null \
+#    | awk 'match($0, /https?:\/\/[^ ]+/, a){print a[0]; exit} match($0, /http:\/\/[^ ]+/, a){print a[0]; exit} { }'
+#)"
 
 # 如果没抓到链接，就用本地端口兜底
 if [ -z "${dash_url:-}" ]; then
@@ -363,8 +338,7 @@ cat <<TXT
 
 如果页面提示 unauthorized / pairing required：
 - 你可以再次运行：
-  cd "$APP_DIR" && docker compose run --rm openclaw-cli dashboard --no-open
-
+  cd "$APP_DIR"
 然后用页面设置里粘贴 gateway token（或直接用带 token 的 URL 打开）。
 TXT
 
@@ -374,44 +348,37 @@ TXT
 BIN_DIR="${HOME}/.local/bin"
 mkdir -p "$BIN_DIR"
 
-cat >"${BIN_DIR}/openclaw-enter" <<EOF
+cat >"${BIN_DIR}/openclaw" <<EOF
 #!/usr/bin/env bash
-set -euo pipefail
-cd "${APP_DIR}"
-docker compose exec openclaw-gateway bash
+
+CONTAINER_NAME="${CONTAINER_NAME}"
+
+if ! docker ps -a --format '{{.Names}}' | grep -q "^\$CONTAINER_NAME\$"; then
+  echo "容器不存在: \$CONTAINER_NAME"
+  exit 1
+fi
+
+case "\$1" in
+  start) docker start "\$CONTAINER_NAME" ;;
+  stop) docker stop "\$CONTAINER_NAME" ;;
+  restart) docker restart "\$CONTAINER_NAME" ;;
+  enter) docker exec -it "\$CONTAINER_NAME" bash ;;
+  logs) docker logs -f --tail=200 "\$CONTAINER_NAME" ;;
+  *) echo "Usage: openclaw {start|stop|restart|enter|logs}" ;;
+esac
 EOF
 
-cat >"${BIN_DIR}/openclaw-restart" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${APP_DIR}"
-docker compose restart openclaw-gateway
-EOF
-
-cat >"${BIN_DIR}/openclaw-logs" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${APP_DIR}"
-docker compose logs -f --tail=200 openclaw-gateway
-EOF
-
-cat >"${BIN_DIR}/openclaw-dashboard" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${APP_DIR}"
-docker compose run --rm openclaw-cli dashboard --no-open
-EOF
-
-chmod +x "${BIN_DIR}/openclaw-enter" "${BIN_DIR}/openclaw-restart" "${BIN_DIR}/openclaw-logs" "${BIN_DIR}/openclaw-dashboard"
+chmod +x "${BIN_DIR}/openclaw"
 
 cat <<TXT
 
 ================= 快捷方式已生成 =================
 已创建：
-  ${BIN_DIR}/openclaw-enter     # 进入容器
-  ${BIN_DIR}/openclaw-restart   # 重启 gateway
-  ${BIN_DIR}/openclaw-logs      # 看日志
-  ${BIN_DIR}/openclaw-dashboard # 输出带 token 的 dashboard 链接
+  ${BIN_DIR}/openclaw enter     # 进入容器
+  ${BIN_DIR}/openclaw restart   # 重启 gateway
+  ${BIN_DIR}/openclaw start     # 启动 gateway
+  ${BIN_DIR}/openclaw stop      # 停止 gateway
+  ${BIN_DIR}/openclaw logs      # 看日志
 
 如果你的 PATH 里没有 ~/.local/bin，请追加：
   echo 'export PATH="\$HOME/.local/bin:\$PATH"' >> ~/.bashrc
