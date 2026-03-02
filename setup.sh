@@ -32,6 +32,7 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1; }
 CONTAINER_NAME="${CONTAINER_NAME:-nodeagent}"
 IMAGE_DEFAULT="${IMAGE_DEFAULT:-docker.io/qingshanjiu/nodeagent:latest}"
 
+
 DATA_ROOT="${DATA_ROOT:-${HOME}/.nodeagent}"     # 宿主机持久化根目录
 APP_DIR="${APP_DIR:-${DATA_ROOT}/compose}"       # 保留给你放配置（不依赖 compose）
 CONFIG_DIR="${CONFIG_DIR:-${DATA_ROOT}/config}"
@@ -190,7 +191,34 @@ fi
 ############################################
 # 9) 生成 gateway token（65位）
 ############################################
-OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-$(python3 -c "import secrets,string;alphabet=string.ascii_lowercase+string.digits;print(''.join(secrets.choice(alphabet) for _ in range(65)))")}"
+gen_token_65() {
+  # 生成 65 位 [a-z0-9]，优先使用 Windows 也常见的工具，避免硬依赖 python3
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 128 | tr -dc 'a-z0-9' | head -c 65
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    node -e "const crypto=require('crypto');const a='abcdefghijklmnopqrstuvwxyz0123456789';let o='';const b=crypto.randomBytes(256);for(let i=0;i<b.length&&o.length<65;i++)o+=a[b[i]%a.length];console.log(o);"
+    return 0
+  fi
+  # Git Bash / Win11 默认有 powershell；优先用 pwsh（PowerShell 7）否则 powershell（Windows PowerShell）
+  if command -v pwsh >/dev/null 2>&1; then
+    pwsh -NoProfile -Command "$a='abcdefghijklmnopqrstuvwxyz0123456789';$o='';1..65|%{$o+=$a[(Get-Random -Minimum 0 -Maximum $a.Length)]};$o"
+    return 0
+  fi
+  if command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -Command "$a='abcdefghijklmnopqrstuvwxyz0123456789';$o='';1..65|%{$o+=$a[(Get-Random -Minimum 0 -Maximum $a.Length)]};$o"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import secrets,string;alphabet=string.ascii_lowercase+string.digits;print(''.join(secrets.choice(alphabet) for _ in range(65)))"
+    return 0
+  fi
+  echo "ERROR: 无法生成 token（缺少 openssl/node/pwsh/powershell/python3）" >&2
+  return 1
+}
+
+OPENCLAW_GATEWAY_TOKEN="${OPENCLAW_GATEWAY_TOKEN:-$(gen_token_65)}"
 log "Gateway token（登录用）：$OPENCLAW_GATEWAY_TOKEN"
 
 ############################################
@@ -204,6 +232,9 @@ cat <<'TXT'
   2) Anthropic (Claude)
   3) OpenAI
   4) Gemini
+  5) Xai
+  6) Qwen (百炼)
+  7) Volcano Engine (豆包)
 TXT
 
 echo "请选择模型:"
@@ -211,23 +242,55 @@ echo "1) NEXOS"
 echo "2) Anthropic"
 echo "3) OpenAI"
 echo "4) Gemini"
+echo "5) Xai"
+echo "6) Qwen (百炼)"
+echo "7) Volcano Engine (豆包)"
 
 read -r -p "输入对应数字: " choice
 
-API_KEY_KEY=""
-API_KEY_VAL=""
+API_KEY=""
 
 case "${choice:-}" in
-  1) read -r -p "请输入 NEXOS_API_KEY: " key; API_KEY_KEY="NEXOS_API_KEY"; API_KEY_VAL="$key" ;;
-  2) read -r -p "请输入 ANTHROPIC_API_KEY: " key; API_KEY_KEY="ANTHROPIC_API_KEY"; API_KEY_VAL="$key" ;;
-  3) read -r -p "请输入 OPENAI_API_KEY: " key; API_KEY_KEY="OPENAI_API_KEY"; API_KEY_VAL="$key" ;;
-  4) read -r -p "请输入 GEMINI_API_KEY: " key; API_KEY_KEY="GEMINI_API_KEY"; API_KEY_VAL="$key" ;;
-  5) read -r -p "请输入 XAI_API_KEY: " key; API_KEY_KEY="XAI_API_KEY"; API_KEY_VAL="$key" ;;
+  1) read -r -p "请输入 NEXOS_API_KEY: " key; API_KEY="-e NEXOS_API_KEY=$key"; ;;
+  2) read -r -p "请输入 ANTHROPIC_API_KEY: " key; API_KEY="-e ANTHROPIC_API_KEY=$key"; ;;
+  3) read -r -p "请输入 OPENAI_API_KEY: " key; API_KEY="-e OPENAI_API_KEY=$key"; ;;
+  4) read -r -p "请输入 GEMINI_API_KEY: " key; API_KEY="-e GEMINI_API_KEY=$key"; ;;
+  5) read -r -p "请输入 XAI_API_KEY: " key; API_KEY="-e XAI_API_KEY=$key"; ;;
+  6)
+    cat <<'TXT'
+
+================= 阿里云百炼 =================
+请选择邻近地域 模型服务 调用可降低网络延迟：
+TXT
+    echo "1) 中国内地（北京）"
+    echo "2) 国际（新加坡）"
+    echo "3) 美国（弗吉尼亚）"
+
+    read -r -p "输入对应数字: " region_choice
+    QWEN_REGION=""
+
+    case "${region_choice:-}" in
+      1)
+        QWEN_REGION="-e QWEN_BASEURL_REGIN=cn"
+        ;;
+      2)
+        QWEN_REGION="-e QWEN_BASEURL_REGIN=ap"
+        ;;
+      3)
+        QWEN_REGION="-e QWEN_BASEURL_REGIN=us"
+        ;;
+      *)
+        die "无效地区选择"
+        ;;
+    esac
+
+    read -r -p "请输入 QWEN_API_KEY: " key; API_KEY="-e QWEN_API_KEY=$key ${QWEN_REGION}"; ;;
+  7) read -r -p "请输入 VOLCANO_ENGINE_API_KEY: " key; API_KEY="-e VOLCANO_ENGINE_API_KEY=$key"; ;;
   *) die "无效选择" ;;
 esac
 
-if [ -z "${API_KEY_VAL:-}" ]; then
-  die "${API_KEY_KEY} 不能为空"
+if [ -z "${API_KEY:-}" ]; then
+  die "${API_KEY} 不能为空"
 fi
 
 ############################################
@@ -272,12 +335,18 @@ docker pull --platform "$platform" "$OPENCLAW_IMAGE"
 # 14) 启动容器（docker run）
 ############################################
 log "启动容器：${CONTAINER_NAME}"
+volume_arg="-v ${DATA_ROOT}:/data"
+# Windows / macOS / Docker Desktop 不需要（也可能不支持）SELinux 的 :Z 参数，仅 Linux 才加
+if [[ "$os" == linux* ]]; then
+  volume_arg="-v ${DATA_ROOT}:/data:Z"
+fi
+
 docker run -d --name "${CONTAINER_NAME}" --restart=always \
   -e "PORT=${host_port}" \
   -e "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" \
   -e "TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}" \
-  -e "${API_KEY_KEY}=${API_KEY_VAL}" \
-  -v ${DATA_ROOT}:/data:Z \
+  ${API_KEY} \
+  ${volume_arg} \
   -p "${host_port}:${host_port}" \
   "${OPENCLAW_IMAGE}"
 
@@ -338,6 +407,16 @@ open_browser() {
         xdg-open "$DASH_URL" >/dev/null 2>&1 || true
       else
         warn "找不到 xdg-open，无法自动打开浏览器，请手动打开：$DASH_URL"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Windows Git Bash / MSYS2 / Cygwin
+      if need_cmd cmd.exe; then
+        cmd.exe /c start "" "$DASH_URL" >/dev/null 2>&1 || true
+      elif need_cmd powershell; then
+        powershell -NoProfile -Command "Start-Process '$DASH_URL'" >/dev/null 2>&1 || true
+      else
+        warn "无法自动打开浏览器，请手动打开：$DASH_URL"
       fi
       ;;
     *)
